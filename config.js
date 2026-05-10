@@ -4,7 +4,7 @@
 // production hostname. The key is visible to anyone who loads the page.
 window.TRITON_CONFIG = {
   MAPTILER_KEY: "HndKYYtTX6F6AUPsnWJH",
-  MAPTILER_STYLE: "streets-v2-dark", // dataviz-dark | basic-v2-dark | streets-v2-dark
+  MAPTILER_STYLE: "dataviz-dark", // dataviz-dark (neutral) | basic-v2-dark | streets-v2-dark
   DEFAULT_CENTER: [35.22, -97.44],   // Norman, OK
   DEFAULT_ZOOM: 7,
   DEFAULT_STATE: "OK",
