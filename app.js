@@ -36,9 +36,21 @@
     Unknown: '#8e94a8'
   };
 
-  // Single transparent pixel — used when a radar tile fails to load
+  // Single transparent pixel — used when a tile fails to load
   const BLANK_PNG =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=';
+
+  // Suppress noisy "tile failed to load" messages for layers whose source
+  // legitimately doesn't have a tile at the requested z/x/y.
+  function silenceTileErrors(layer) {
+    layer.on('tileerror', (e) => {
+      if (e.tile) {
+        e.tile.style.display = 'none';
+        e.tile.src = BLANK_PNG;
+      }
+    });
+    return layer;
+  }
 
   // -------------------- shared state --------------------
   const S = {
@@ -46,8 +58,10 @@
     baseLayer: null,
     labelsLayer: null,
     userLocMarker: null,
+    userLocCircle: null,
     baseStyle: CFG.MAPTILER_STYLE || 'dataviz-dark',
     radarLayers: [],          // [{layer, time, isFuture}]
+    radarSig: null,           // fingerprint to skip no-op rebuilds
     radarIdx: 0,
     radarHost: '',
     radarTimer: null,
@@ -123,8 +137,8 @@
       zoomControl: false,
       attributionControl: true,
       worldCopyJump: true,
-      zoomSnap: 0.5,
-      maxZoom: 18,
+      zoomSnap: 1,
+      maxZoom: 16,
       minZoom: 3,
     }).setView(CFG.DEFAULT_CENTER, CFG.DEFAULT_ZOOM);
 
@@ -152,18 +166,18 @@
 
   function addLabelsOverlay() {
     const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
-    S.labelsLayer = L.tileLayer(
+    S.labelsLayer = silenceTileErrors(L.tileLayer(
       `https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}${retina}.png`,
       {
         pane: 'labelsPane',
         subdomains: 'abcd',
-        maxZoom: 18,
-        maxNativeZoom: 18,
+        maxZoom: 16,
+        maxNativeZoom: 16,
         attribution: '<a href="https://carto.com/attributions" target="_blank">© Carto</a>',
         crossOrigin: true,
         errorTileUrl: BLANK_PNG,
       }
-    ).addTo(S.map);
+    )).addTo(S.map);
   }
 
   function setBaseStyle(styleId) {
@@ -172,14 +186,14 @@
     // Satellite/hybrid use jpg; vector-derived dark styles use png
     const ext = (styleId === 'satellite' || styleId === 'hybrid') ? 'jpg' : 'png';
     const url = `https://api.maptiler.com/maps/${styleId}/{z}/{x}/{y}${retina}.${ext}?key=${CFG.MAPTILER_KEY}`;
-    const newLayer = L.tileLayer(url, {
+    const newLayer = silenceTileErrors(L.tileLayer(url, {
       attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
-      maxZoom: 18,
-      maxNativeZoom: 18,
+      maxZoom: 16,
+      maxNativeZoom: 16,
       crossOrigin: true,
       zIndex: 1,
       errorTileUrl: BLANK_PNG,
-    });
+    }));
     newLayer.addTo(S.map);
     if (S.baseLayer) {
       // Remove old once new has had a moment to start loading
@@ -231,6 +245,16 @@
       ...nowcast.map(f => ({ ...f, isFuture: true })),
     ];
 
+    // Build a fingerprint so the auto-refresh doesn't tear down/rebuild
+    // layers when nothing has actually changed (which was making the radar
+    // briefly vanish + spam the console mid-interaction).
+    const sig = [
+      S.colorScheme, S.smooth ? 1 : 0,
+      ...frames.map(f => f.time + (f.isFuture ? 'n' : 'p'))
+    ].join('|');
+    if (sig === S.radarSig && S.radarLayers.length) return;
+    S.radarSig = sig;
+
     // Tear down old layers
     for (const r of S.radarLayers) S.map.removeLayer(r.layer);
     S.radarLayers = [];
@@ -238,18 +262,19 @@
     if (!frames.length) return;
 
     for (const f of frames) {
-      const url = `${S.radarHost}${f.path}/512/{z}/{x}/{y}/${S.colorScheme}/${S.smooth ? 1 : 0}_1.png`;
-      const layer = L.tileLayer(url, {
+      const url = `${S.radarHost}${f.path}/256/{z}/{x}/{y}/${S.colorScheme}/${S.smooth ? 1 : 0}_1.png`;
+      const layer = silenceTileErrors(L.tileLayer(url, {
         opacity: 0,
         zIndex: 200,
         crossOrigin: true,
-        // RainViewer publishes radar tiles up to native zoom 12 — let Leaflet
-        // upscale that highest tile when the user zooms in further so the
-        // radar stays visible (slightly soft) instead of disappearing.
-        maxZoom: 18,
+        // RainViewer publishes radar tiles only up to native zoom 12 — let
+        // Leaflet upscale the highest available tile at deeper zooms instead
+        // of returning 404s.
+        maxZoom: 16,
         maxNativeZoom: 12,
+        minNativeZoom: 1,
         errorTileUrl: BLANK_PNG,
-      });
+      }));
       layer.addTo(S.map);
       S.radarLayers.push({ layer, time: f.time, isFuture: f.isFuture });
     }
@@ -552,22 +577,50 @@
 
   // -------------------- user location dot --------------------
   function showUserLocation(lat, lng, accuracy) {
-    if (!S.userLocMarker) {
-      const icon = L.divIcon({
-        className: 'user-location-dot',
-        html: '<span class="ulp-pulse"></span><span class="ulp-core"></span>',
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
-      });
-      S.userLocMarker = L.marker([lat, lng], {
-        icon,
-        interactive: false,
-        keyboard: false,
-        zIndexOffset: 500,
-      }).addTo(S.map);
-    } else {
+    console.log('[Triton] user location', { lat, lng, accuracy });
+
+    // Accuracy ring — translucent circle showing how confident we are.
+    // This is also a guaranteed-visible fallback if the divIcon CSS fails.
+    if (S.userLocCircle) S.map.removeLayer(S.userLocCircle);
+    S.userLocCircle = L.circle([lat, lng], {
+      radius: Math.max(50, accuracy || 100),
+      color: '#2196f3',
+      weight: 1,
+      opacity: 0.5,
+      fillColor: '#2196f3',
+      fillOpacity: 0.08,
+      interactive: false,
+    }).addTo(S.map);
+
+    // The pulsing dot itself — built with inline styles so a CSS
+    // regression can't make it invisible. The pulse ring still uses a
+    // CSS class so it can animate.
+    if (S.userLocMarker) {
       S.userLocMarker.setLatLng([lat, lng]);
+      return;
     }
+    const icon = L.divIcon({
+      className: 'user-location-dot',
+      html: `
+        <div class="ulp-pulse"></div>
+        <div style="
+          position:absolute; inset:0;
+          border-radius:50%;
+          background:#2196f3;
+          border:3px solid #ffffff;
+          box-sizing:border-box;
+          box-shadow: 0 0 4px rgba(0,0,0,0.7), 0 0 12px rgba(33,150,243,0.7);
+          z-index: 2;
+        "></div>`,
+      iconSize: [18, 18],
+      iconAnchor: [9, 9],
+    });
+    S.userLocMarker = L.marker([lat, lng], {
+      icon,
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: 1000,
+    }).addTo(S.map);
   }
 
   function openSearch() {
@@ -788,19 +841,23 @@
         return;
       }
       $('locate-btn').classList.add('active');
+      showToast('Locating…');
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           $('locate-btn').classList.remove('active');
           const { latitude, longitude, accuracy } = pos.coords;
           showUserLocation(latitude, longitude, accuracy);
-          const targetZoom = Math.max(S.map.getZoom(), 9);
+          const targetZoom = Math.max(S.map.getZoom(), 10);
           S.map.flyTo([latitude, longitude], targetZoom, { duration: 1.2 });
+          showToast(`Located (±${Math.round(accuracy)} m)`);
         },
-        () => {
+        (err) => {
           $('locate-btn').classList.remove('active');
-          showToast('Could not get your location', 'error');
+          console.warn('[Triton] geolocation error', err);
+          const reasons = { 1: 'permission denied', 2: 'position unavailable', 3: 'timed out' };
+          showToast(`Location: ${reasons[err.code] || err.message || 'failed'}`, 'error');
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60_000 }
+        { enableHighAccuracy: false, timeout: 15000, maximumAge: 30_000 }
       );
     });
   }
