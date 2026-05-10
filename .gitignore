@@ -1,0 +1,15 @@
+# Local secrets — the MapTiler key lives in config.js and IS shipped to the
+# browser (static site, no build step). Keep the raw notepad version of keys
+# out of git anyway.
+api_keys.txt
+
+# Editor / tooling / OS junk
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Just in case
+node_modules/
+*.log

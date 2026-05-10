@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#06080f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Triton — animated NEXRAD radar and live NWS alerts">
+  <title>Triton Weather Radar</title>
+
+  <link rel="preconnect" href="https://api.maptiler.com">
+  <link rel="preconnect" href="https://tilecache.rainviewer.com">
+  <link rel="preconnect" href="https://api.rainviewer.com">
+  <link rel="preconnect" href="https://api.weather.gov">
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <header class="top-bar glass">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name">TRITON</span>
+    </div>
+    <select id="state-select" class="state-select" aria-label="Region"></select>
+    <button id="alert-count" class="alert-count zero" aria-label="Toggle alerts panel">
+      <span class="alert-count-num" id="alert-count-num">0</span>
+      <span class="alert-count-label">alerts</span>
+    </button>
+  </header>
+
+  <div class="rail">
+    <button id="layers-btn" class="rail-btn glass" aria-label="Layers">
+      <svg viewBox="0 0 24 24"><path d="M12 16l-5.5-3.5L2 16l10 6 10-6-4.5-3L12 16zm0-2.5L18.5 9 12 4.5 5.5 9 12 13.5z"/></svg>
+    </button>
+    <button id="locate-btn" class="rail-btn glass" aria-label="My location">
+      <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm8.94 3A8.994 8.994 0 0013 3.06V1h-2v2.06A8.994 8.994 0 003.06 11H1v2h2.06A8.994 8.994 0 0011 20.94V23h2v-2.06A8.994 8.994 0 0020.94 13H23v-2h-2.06zM12 19a7 7 0 110-14 7 7 0 010 14z"/></svg>
+    </button>
+  </div>
+
+  <div id="layers-panel" class="layers-panel glass" aria-hidden="true">
+    <div class="layers-title">Layers</div>
+    <div class="layers-row">
+      <label for="opacity">Radar opacity</label>
+      <input type="range" id="opacity" min="0" max="100" value="75">
+      <span class="layers-value" id="opacity-value">75%</span>
+    </div>
+    <div class="layers-row">
+      <label for="color-scheme">Color scheme</label>
+      <select id="color-scheme">
+        <option value="2">Universal Blue</option>
+        <option value="6" selected>The Original</option>
+        <option value="8">NEXRAD</option>
+        <option value="3">Titan</option>
+        <option value="1">Original v1</option>
+      </select>
+    </div>
+    <div class="layers-row inline">
+      <label for="alerts-toggle">Show alerts</label>
+      <label class="switch"><input type="checkbox" id="alerts-toggle" checked><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="smooth-toggle">Smoothing</label>
+      <label class="switch"><input type="checkbox" id="smooth-toggle" checked><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="forecast-toggle">Include forecast</label>
+      <label class="switch"><input type="checkbox" id="forecast-toggle" checked><span class="switch-track"></span></label>
+    </div>
+  </div>
+
+  <div class="timeline glass">
+    <button id="play-pause" class="timeline-btn" aria-label="Play/Pause">
+      <svg viewBox="0 0 24 24" class="icon-play"><path d="M8 5v14l11-7z"/></svg>
+      <svg viewBox="0 0 24 24" class="icon-pause"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+    </button>
+    <div class="timeline-meta">
+      <div class="timeline-time" id="frame-time">--:--</div>
+      <div class="timeline-label" id="frame-label">RADAR</div>
+    </div>
+    <input type="range" id="frame-scrub" min="0" max="0" value="0" aria-label="Radar frame">
+    <div class="timeline-speed" role="group" aria-label="Animation speed">
+      <button class="speed-btn" data-speed="1500">1×</button>
+      <button class="speed-btn active" data-speed="700">2×</button>
+      <button class="speed-btn" data-speed="300">4×</button>
+    </div>
+  </div>
+
+  <aside id="alert-sheet" class="alert-sheet glass" aria-label="Active alerts">
+    <div class="sheet-handle" id="sheet-handle">
+      <div class="sheet-handle-bar"></div>
+      <div class="sheet-title">
+        <span id="sheet-title-text">Active Alerts</span>
+        <button class="sheet-close" id="sheet-close" aria-label="Close">×</button>
+      </div>
+    </div>
+    <div class="sheet-filters" id="sheet-filters">
+      <button class="filter-chip active" data-severity="all">All</button>
+      <button class="filter-chip" data-severity="Extreme"><span class="chip-dot" style="background:#ff1744"></span>Extreme</button>
+      <button class="filter-chip" data-severity="Severe"><span class="chip-dot" style="background:#ff6d00"></span>Severe</button>
+      <button class="filter-chip" data-severity="Moderate"><span class="chip-dot" style="background:#ffd600"></span>Moderate</button>
+      <button class="filter-chip" data-severity="Minor"><span class="chip-dot" style="background:#00b0ff"></span>Minor</button>
+    </div>
+    <div class="sheet-list" id="alert-list"></div>
+  </aside>
+
+  <div id="loader" class="loader glass">
+    <div class="loader-spinner"></div>
+    <div class="loader-text" id="loader-text">Loading radar…</div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
