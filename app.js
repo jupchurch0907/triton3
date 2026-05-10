@@ -272,11 +272,12 @@
 
     S.alertLayer = L.geoJSON(polyFeatures, {
       style: (f) => {
-        const color = SEVERITY_COLORS[severityOf(f)] || SEVERITY_COLORS.Unknown;
+        const sev = severityOf(f);
+        const color = SEVERITY_COLORS[sev] || SEVERITY_COLORS.Unknown;
         return {
           color, weight: 2, opacity: 0.9,
           fillColor: color, fillOpacity: 0.18,
-          className: 'alert-polygon'
+          className: 'alert-polygon severity-' + sev.toLowerCase()
         };
       },
       onEachFeature: (f, layer) => {
