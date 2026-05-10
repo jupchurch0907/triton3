@@ -66,7 +66,12 @@
 
     sheetExpanded: false,
     layersOpen: false,
+    searchOpen: false,
     alertTimer: null,
+
+    pinMarker: null,
+    searchAbort: null,
+    searchDebounce: null,
   };
 
   // -------------------- helpers --------------------
@@ -117,7 +122,7 @@
       attributionControl: true,
       worldCopyJump: true,
       zoomSnap: 0.5,
-      maxZoom: 14,
+      maxZoom: 18,
       minZoom: 3,
     }).setView(CFG.DEFAULT_CENTER, CFG.DEFAULT_ZOOM);
 
@@ -210,7 +215,11 @@
         opacity: 0,
         zIndex: 200,
         crossOrigin: true,
+        // RainViewer publishes radar tiles up to native zoom 12 — let Leaflet
+        // upscale that highest tile when the user zooms in further so the
+        // radar stays visible (slightly soft) instead of disappearing.
         maxZoom: 18,
+        maxNativeZoom: 12,
         errorTileUrl: BLANK_PNG,
       });
       layer.addTo(S.map);
@@ -436,6 +445,95 @@
       </div>`;
   }
 
+  // -------------------- search + pin --------------------
+  async function geocode(query) {
+    if (S.searchAbort) S.searchAbort.abort();
+    S.searchAbort = new AbortController();
+    const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(query)}.json`
+              + `?key=${CFG.MAPTILER_KEY}&limit=6&country=us`;
+    const r = await fetch(url, { signal: S.searchAbort.signal });
+    if (!r.ok) throw new Error('geocode ' + r.status);
+    const data = await r.json();
+    return data.features || [];
+  }
+
+  function renderSearchResults(features) {
+    const box = $('search-results');
+    if (!features.length) {
+      box.innerHTML = `<div class="search-empty">No matches</div>`;
+      return;
+    }
+    box.innerHTML = features.map((f, i) => {
+      const name = escapeHtml(f.text || f.place_name || 'Unknown');
+      const ctx = escapeHtml(f.place_name || '');
+      return `
+        <div class="search-result" data-idx="${i}">
+          <div class="search-result-name">${name}</div>
+          <div class="search-result-context">${ctx}</div>
+        </div>`;
+    }).join('');
+    box.querySelectorAll('.search-result').forEach((el, idx) => {
+      el.addEventListener('click', () => {
+        const f = features[idx];
+        const [lng, lat] = f.center || [];
+        if (typeof lat !== 'number' || typeof lng !== 'number') return;
+        dropPin(lat, lng, f.text || f.place_name, f.place_name);
+        closeSearch();
+      });
+    });
+  }
+
+  function dropPin(lat, lng, name, context) {
+    removePin();
+    const icon = L.divIcon({
+      className: 'triton-pin',
+      html: `
+        <svg viewBox="0 0 32 40">
+          <path class="pin-shape" d="M16 1c-7.7 0-14 6.3-14 14 0 10.5 14 24 14 24s14-13.5 14-24c0-7.7-6.3-14-14-14z"/>
+          <circle class="pin-dot" cx="16" cy="15" r="5"/>
+        </svg>`,
+      iconSize: [32, 40],
+      iconAnchor: [16, 38],
+      popupAnchor: [0, -34],
+    });
+    S.pinMarker = L.marker([lat, lng], { icon, zIndexOffset: 1000 }).addTo(S.map);
+    const coords = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    S.pinMarker.bindPopup(`
+      <div class="pin-popup-name">${escapeHtml(name || 'Pinned location')}</div>
+      ${context ? `<div class="pin-popup-context">${escapeHtml(context)}</div>` : ''}
+      <div class="pin-popup-coords">${coords}</div>
+      <button class="pin-remove" data-pin-remove>Remove pin</button>
+    `, { maxWidth: 280 });
+    S.pinMarker.on('popupopen', (e) => {
+      e.popup._contentNode.querySelector('[data-pin-remove]')
+        ?.addEventListener('click', removePin);
+    });
+    const targetZoom = Math.max(S.map.getZoom(), 11);
+    S.map.flyTo([lat, lng], targetZoom, { duration: 1.0 });
+    setTimeout(() => S.pinMarker?.openPopup(), 700);
+    $('clear-pin-btn').classList.remove('hidden');
+  }
+
+  function removePin() {
+    if (S.pinMarker) {
+      S.map.removeLayer(S.pinMarker);
+      S.pinMarker = null;
+    }
+    $('clear-pin-btn').classList.add('hidden');
+  }
+
+  function openSearch() {
+    S.searchOpen = true;
+    $('search-panel').classList.add('open');
+    $('search-btn').classList.add('active');
+    setTimeout(() => $('search-input').focus(), 50);
+  }
+  function closeSearch() {
+    S.searchOpen = false;
+    $('search-panel').classList.remove('open');
+    $('search-btn').classList.remove('active');
+  }
+
   function startAlertRefresh() {
     if (S.alertTimer) clearInterval(S.alertTimer);
     S.alertTimer = setInterval(() => {
@@ -584,6 +682,56 @@
       panel.classList.remove('open');
       btn.classList.remove('active');
     });
+
+    // Search panel
+    $('search-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (S.searchOpen) closeSearch(); else openSearch();
+    });
+    document.addEventListener('click', (e) => {
+      if (!S.searchOpen) return;
+      const panel = $('search-panel');
+      const btn = $('search-btn');
+      if (panel.contains(e.target) || btn.contains(e.target)) return;
+      closeSearch();
+    });
+
+    const searchInput = $('search-input');
+    const searchClear = $('search-clear');
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.trim();
+      searchClear.classList.toggle('hidden', q.length === 0);
+      clearTimeout(S.searchDebounce);
+      if (!q) { $('search-results').innerHTML = ''; return; }
+      if (q.length < 2) return;
+      S.searchDebounce = setTimeout(() => {
+        geocode(q)
+          .then(renderSearchResults)
+          .catch((err) => {
+            if (err.name !== 'AbortError') {
+              console.error(err);
+              $('search-results').innerHTML = `<div class="search-empty">Search failed</div>`;
+            }
+          });
+      }, 250);
+    });
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const first = $('search-results').querySelector('.search-result');
+        if (first) first.click();
+      } else if (e.key === 'Escape') {
+        closeSearch();
+      }
+    });
+    searchClear.addEventListener('click', () => {
+      searchInput.value = '';
+      searchClear.classList.add('hidden');
+      $('search-results').innerHTML = '';
+      searchInput.focus();
+    });
+
+    // Clear pin (rail button only visible when a pin exists)
+    $('clear-pin-btn').addEventListener('click', removePin);
 
     // Locate
     $('locate-btn').addEventListener('click', () => {
