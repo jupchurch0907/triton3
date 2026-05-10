@@ -44,6 +44,8 @@
   const S = {
     map: null,
     baseLayer: null,
+    labelsLayer: null,
+    userLocMarker: null,
     baseStyle: CFG.MAPTILER_STYLE || 'dataviz-dark',
     radarLayers: [],          // [{layer, time, isFuture}]
     radarIdx: 0,
@@ -128,7 +130,15 @@
 
     L.control.zoom({ position: 'bottomright' }).addTo(S.map);
 
+    // Custom pane for labels — sits above radar (tilePane=200) but below
+    // alert polygons (overlayPane=400) so city names stay readable through
+    // the radar overlay.
+    S.map.createPane('labelsPane');
+    S.map.getPane('labelsPane').style.zIndex = 350;
+    S.map.getPane('labelsPane').style.pointerEvents = 'none';
+
     setBaseStyle(S.baseStyle);
+    addLabelsOverlay();
 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -140,6 +150,22 @@
     });
   }
 
+  function addLabelsOverlay() {
+    const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
+    S.labelsLayer = L.tileLayer(
+      `https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}${retina}.png`,
+      {
+        pane: 'labelsPane',
+        subdomains: 'abcd',
+        maxZoom: 18,
+        maxNativeZoom: 18,
+        attribution: '<a href="https://carto.com/attributions" target="_blank">© Carto</a>',
+        crossOrigin: true,
+        errorTileUrl: BLANK_PNG,
+      }
+    ).addTo(S.map);
+  }
+
   function setBaseStyle(styleId) {
     S.baseStyle = styleId;
     const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
@@ -149,8 +175,10 @@
     const newLayer = L.tileLayer(url, {
       attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
       maxZoom: 18,
+      maxNativeZoom: 18,
       crossOrigin: true,
       zIndex: 1,
+      errorTileUrl: BLANK_PNG,
     });
     newLayer.addTo(S.map);
     if (S.baseLayer) {
@@ -522,6 +550,26 @@
     $('clear-pin-btn').classList.add('hidden');
   }
 
+  // -------------------- user location dot --------------------
+  function showUserLocation(lat, lng, accuracy) {
+    if (!S.userLocMarker) {
+      const icon = L.divIcon({
+        className: 'user-location-dot',
+        html: '<span class="ulp-pulse"></span><span class="ulp-core"></span>',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      });
+      S.userLocMarker = L.marker([lat, lng], {
+        icon,
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 500,
+      }).addTo(S.map);
+    } else {
+      S.userLocMarker.setLatLng([lat, lng]);
+    }
+  }
+
   function openSearch() {
     S.searchOpen = true;
     $('search-panel').classList.add('open');
@@ -743,13 +791,16 @@
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           $('locate-btn').classList.remove('active');
-          S.map.flyTo([pos.coords.latitude, pos.coords.longitude], 9, { duration: 1.2 });
+          const { latitude, longitude, accuracy } = pos.coords;
+          showUserLocation(latitude, longitude, accuracy);
+          const targetZoom = Math.max(S.map.getZoom(), 9);
+          S.map.flyTo([latitude, longitude], targetZoom, { duration: 1.2 });
         },
         () => {
           $('locate-btn').classList.remove('active');
           showToast('Could not get your location', 'error');
         },
-        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60_000 }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60_000 }
       );
     });
   }

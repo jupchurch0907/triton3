@@ -1,4 +1,4 @@
-# Triton Weather Radar
+# Triton 3 Weather Radar
 
 A slick, mobile-first browser weather radar with animated NEXRAD overlay
 and live NWS alerts. Pure static site — no backend, no build step.
