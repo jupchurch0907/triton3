@@ -43,6 +43,8 @@
   // -------------------- shared state --------------------
   const S = {
     map: null,
+    baseLayer: null,
+    baseStyle: CFG.MAPTILER_STYLE || 'dataviz-dark',
     radarLayers: [],          // [{layer, time, isFuture}]
     radarIdx: 0,
     radarHost: '',
@@ -121,13 +123,7 @@
 
     L.control.zoom({ position: 'bottomright' }).addTo(S.map);
 
-    const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
-    const tileUrl = `https://api.maptiler.com/maps/${CFG.MAPTILER_STYLE}/{z}/{x}/{y}${retina}.png?key=${CFG.MAPTILER_KEY}`;
-    L.tileLayer(tileUrl, {
-      attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
-      maxZoom: 18,
-      crossOrigin: true,
-    }).addTo(S.map);
+    setBaseStyle(S.baseStyle);
 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -137,6 +133,27 @@
         fetchAlerts(false);
       }
     });
+  }
+
+  function setBaseStyle(styleId) {
+    S.baseStyle = styleId;
+    const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
+    // Satellite/hybrid use jpg; vector-derived dark styles use png
+    const ext = (styleId === 'satellite' || styleId === 'hybrid') ? 'jpg' : 'png';
+    const url = `https://api.maptiler.com/maps/${styleId}/{z}/{x}/{y}${retina}.${ext}?key=${CFG.MAPTILER_KEY}`;
+    const newLayer = L.tileLayer(url, {
+      attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
+      maxZoom: 18,
+      crossOrigin: true,
+      zIndex: 1,
+    });
+    newLayer.addTo(S.map);
+    if (S.baseLayer) {
+      // Remove old once new has had a moment to start loading
+      const old = S.baseLayer;
+      setTimeout(() => S.map.removeLayer(old), 250);
+    }
+    S.baseLayer = newLayer;
   }
 
   // -------------------- state selector --------------------
@@ -488,6 +505,13 @@
       const cur = S.radarLayers[S.radarIdx];
       if (cur) cur.layer.setOpacity(S.opacity);
     });
+
+    // Base map style
+    const baseSel = $('base-style');
+    if (baseSel) {
+      baseSel.value = S.baseStyle;
+      baseSel.addEventListener('change', (e) => setBaseStyle(e.target.value));
+    }
 
     // Color scheme
     $('color-scheme').addEventListener('change', (e) => {
