@@ -36,30 +36,21 @@
     Unknown: '#8e94a8'
   };
 
-  // Single transparent pixel — used when a tile fails to load
+  // Single transparent pixel — served via errorTileUrl when a tile 404s
+  // (e.g. RainViewer past the radar coverage edge).
   const BLANK_PNG =
     'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=';
-
-  // Suppress noisy "tile failed to load" messages for layers whose source
-  // legitimately doesn't have a tile at the requested z/x/y.
-  function silenceTileErrors(layer) {
-    layer.on('tileerror', (e) => {
-      if (e.tile) {
-        e.tile.style.display = 'none';
-        e.tile.src = BLANK_PNG;
-      }
-    });
-    return layer;
-  }
 
   // -------------------- shared state --------------------
   const S = {
     map: null,
     baseLayer: null,
+    baseSwapTimer: null,
     labelsLayer: null,
     userLocMarker: null,
     userLocCircle: null,
     baseStyle: CFG.MAPTILER_STYLE || 'dataviz-dark',
+    radarData: null,          // cached RainViewer JSON
     radarLayers: [],          // [{layer, time, isFuture}]
     radarSig: null,           // fingerprint to skip no-op rebuilds
     radarIdx: 0,
@@ -77,6 +68,8 @@
     showAlerts: true,
     alertLayer: null,
     allAlerts: [],            // [{feature, severity, hasGeom, layer}]
+    alertSig: null,
+    alertsAbort: null,
     filter: 'all',
     state: CFG.DEFAULT_STATE || 'OK',
 
@@ -166,7 +159,7 @@
 
   function addLabelsOverlay() {
     const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
-    S.labelsLayer = silenceTileErrors(L.tileLayer(
+    S.labelsLayer = L.tileLayer(
       `https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}${retina}.png`,
       {
         pane: 'labelsPane',
@@ -177,7 +170,7 @@
         crossOrigin: true,
         errorTileUrl: BLANK_PNG,
       }
-    )).addTo(S.map);
+    ).addTo(S.map);
   }
 
   function setBaseStyle(styleId) {
@@ -186,21 +179,25 @@
     // Satellite/hybrid use jpg; vector-derived dark styles use png
     const ext = (styleId === 'satellite' || styleId === 'hybrid') ? 'jpg' : 'png';
     const url = `https://api.maptiler.com/maps/${styleId}/{z}/{x}/{y}${retina}.${ext}?key=${CFG.MAPTILER_KEY}`;
-    const newLayer = silenceTileErrors(L.tileLayer(url, {
+    const newLayer = L.tileLayer(url, {
       attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
       maxZoom: 16,
       maxNativeZoom: 16,
       crossOrigin: true,
       zIndex: 1,
       errorTileUrl: BLANK_PNG,
-    }));
+    });
     newLayer.addTo(S.map);
-    if (S.baseLayer) {
-      // Remove old once new has had a moment to start loading
-      const old = S.baseLayer;
-      setTimeout(() => S.map.removeLayer(old), 250);
-    }
+    const old = S.baseLayer;
     S.baseLayer = newLayer;
+    // Cancel any pending removal so rapid style switches don't leak layers.
+    if (S.baseSwapTimer) clearTimeout(S.baseSwapTimer);
+    if (old) {
+      S.baseSwapTimer = setTimeout(() => {
+        S.map.removeLayer(old);
+        S.baseSwapTimer = null;
+      }, 250);
+    }
   }
 
   // -------------------- state selector --------------------
@@ -235,19 +232,28 @@
   async function fetchRadar() {
     const r = await fetch('https://api.rainviewer.com/public/weather-maps.json', { cache: 'no-store' });
     if (!r.ok) throw new Error('RainViewer ' + r.status);
-    const data = await r.json();
-    S.radarHost = data.host;
+    S.radarData = await r.json();
+    S.radarHost = S.radarData.host;
+    rebuildRadarLayers();
+  }
 
-    const past = data.radar?.past || [];
-    const nowcast = S.showForecast ? (data.radar?.nowcast || []) : [];
+  // Builds (or rebuilds) tile layers from the cached RainViewer JSON using
+  // the current colorScheme / smooth / showForecast settings. Called both
+  // after a network fetch and after a settings toggle, so toggles don't
+  // re-hit the API.
+  function rebuildRadarLayers() {
+    if (!S.radarData) return;
+
+    const past = S.radarData.radar?.past || [];
+    const nowcast = S.showForecast ? (S.radarData.radar?.nowcast || []) : [];
     const frames = [
       ...past.map(f => ({ ...f, isFuture: false })),
       ...nowcast.map(f => ({ ...f, isFuture: true })),
     ];
 
-    // Build a fingerprint so the auto-refresh doesn't tear down/rebuild
-    // layers when nothing has actually changed (which was making the radar
-    // briefly vanish + spam the console mid-interaction).
+    // Fingerprint includes render settings + frame times, so an auto-refresh
+    // with no new frames is a no-op and a settings change with the same
+    // frames forces a rebuild.
     const sig = [
       S.colorScheme, S.smooth ? 1 : 0,
       ...frames.map(f => f.time + (f.isFuture ? 'n' : 'p'))
@@ -255,7 +261,10 @@
     if (sig === S.radarSig && S.radarLayers.length) return;
     S.radarSig = sig;
 
-    // Tear down old layers
+    // Remember which frame the user was viewing so we can land on it again
+    // after rebuild (otherwise auto-refresh jumps back to "now" mid-scrub).
+    const prevTime = S.radarLayers[S.radarIdx]?.time;
+
     for (const r of S.radarLayers) S.map.removeLayer(r.layer);
     S.radarLayers = [];
 
@@ -263,7 +272,7 @@
 
     for (const f of frames) {
       const url = `${S.radarHost}${f.path}/256/{z}/{x}/{y}/${S.colorScheme}/${S.smooth ? 1 : 0}_1.png`;
-      const layer = silenceTileErrors(L.tileLayer(url, {
+      const layer = L.tileLayer(url, {
         opacity: 0,
         zIndex: 200,
         crossOrigin: true,
@@ -274,7 +283,7 @@
         maxNativeZoom: 12,
         minNativeZoom: 1,
         errorTileUrl: BLANK_PNG,
-      }));
+      });
       layer.addTo(S.map);
       S.radarLayers.push({ layer, time: f.time, isFuture: f.isFuture });
     }
@@ -283,9 +292,12 @@
     scrub.max = Math.max(0, S.radarLayers.length - 1);
     setRangeFill(scrub);
 
-    // Start at the most recent past frame
-    const lastPastIdx = Math.max(0, past.length - 1);
-    setFrame(lastPastIdx);
+    let targetIdx = Math.max(0, past.length - 1);
+    if (prevTime != null) {
+      const found = S.radarLayers.findIndex(r => r.time === prevTime);
+      if (found >= 0) targetIdx = found;
+    }
+    setFrame(targetIdx);
 
     if (S.playing) startAnim();
   }
@@ -324,16 +336,20 @@
 
   // -------------------- alerts --------------------
   async function fetchAlerts(flyTo) {
+    if (S.alertsAbort) S.alertsAbort.abort();
+    S.alertsAbort = new AbortController();
     try {
       const url = `https://api.weather.gov/alerts/active?area=${encodeURIComponent(S.state)}`;
       const r = await fetch(url, {
         headers: { 'Accept': 'application/geo+json' },
         cache: 'no-store',
+        signal: S.alertsAbort.signal,
       });
       if (!r.ok) throw new Error('NWS ' + r.status);
       const geo = await r.json();
       renderAlerts(geo, flyTo);
     } catch (e) {
+      if (e.name === 'AbortError') return;
       console.error('alerts fetch failed', e);
       showToast('Alert refresh failed', 'error');
     }
@@ -342,11 +358,21 @@
   const severityOf = (f) => f?.properties?.severity || 'Unknown';
 
   function renderAlerts(geo, flyTo) {
+    const features = geo.features || [];
+
+    // Fingerprint by id + sent time + state. State is included so a state
+    // switch always invalidates the cache even if alert IDs happen to clash.
+    const sig = 'state=' + S.state + '|' + features
+      .map(f => `${f.id}:${f.properties?.sent || ''}`)
+      .sort()
+      .join('|');
+    if (sig === S.alertSig && S.alertLayer) return;
+    S.alertSig = sig;
+
     if (S.alertLayer) S.map.removeLayer(S.alertLayer);
     S.alertLayer = null;
     S.allAlerts = [];
 
-    const features = geo.features || [];
     const polyFeatures = features.filter(f => f.geometry);
 
     S.alertLayer = L.geoJSON(polyFeatures, {
@@ -367,12 +393,10 @@
     if (S.showAlerts) S.alertLayer.addTo(S.map);
 
     const layersByFeature = new Map();
-    if (S.alertLayer) {
-      S.alertLayer.eachLayer(l => {
-        const id = l.feature?.id;
-        if (id) layersByFeature.set(id, l);
-      });
-    }
+    S.alertLayer.eachLayer(l => {
+      const id = l.feature?.id;
+      if (id) layersByFeature.set(id, l);
+    });
 
     for (const f of features) {
       S.allAlerts.push({
@@ -396,12 +420,18 @@
     renderAlertList();
     updateAlertCount();
 
-    if (flyTo && S.alertLayer && polyFeatures.length) {
+    if (flyTo && polyFeatures.length) {
       try {
         const b = S.alertLayer.getBounds();
         if (b.isValid()) S.map.fitBounds(b.pad(0.15), { maxZoom: 9, animate: true });
       } catch (e) {}
     }
+  }
+
+  function filteredAlerts() {
+    return S.filter === 'all'
+      ? S.allAlerts
+      : S.allAlerts.filter(a => a.severity === S.filter);
   }
 
   function updateAlertCount() {
@@ -412,9 +442,7 @@
 
   function renderAlertList() {
     const list = $('alert-list');
-    const filtered = S.filter === 'all'
-      ? S.allAlerts
-      : S.allAlerts.filter(a => a.severity === S.filter);
+    const filtered = filteredAlerts();
 
     $('sheet-title-text').textContent =
       S.filter === 'all'
@@ -454,23 +482,6 @@
           </div>
         </div>`;
     }).join('');
-
-    list.querySelectorAll('.alert-card').forEach((card, idx) => {
-      card.addEventListener('click', () => {
-        const a = filtered[idx];
-        if (a.layer) {
-          const b = a.layer.getBounds();
-          if (b.isValid()) {
-            S.map.fitBounds(b.pad(0.2), { maxZoom: 10, animate: true });
-            // Open the popup once the fly-to is settled
-            setTimeout(() => a.layer.openPopup(b.getCenter()), 350);
-          }
-          if (window.innerWidth < 768) collapseSheet();
-        } else {
-          showToast('This alert has no map geometry');
-        }
-      });
-    });
   }
 
   function buildPopup(f, color) {
@@ -577,8 +588,6 @@
 
   // -------------------- user location dot --------------------
   function showUserLocation(lat, lng, accuracy) {
-    console.log('[Triton] user location', { lat, lng, accuracy });
-
     // Accuracy ring — translucent circle showing how confident we are.
     // This is also a guaranteed-visible fallback if the divIcon CSS fails.
     if (S.userLocCircle) S.map.removeLayer(S.userLocCircle);
@@ -633,6 +642,9 @@
     S.searchOpen = false;
     $('search-panel').classList.remove('open');
     $('search-btn').classList.remove('active');
+    // Drop stale results so re-opening doesn't flash old matches.
+    $('search-results').innerHTML = '';
+    if (S.searchAbort) { S.searchAbort.abort(); S.searchAbort = null; }
   }
 
   function startAlertRefresh() {
@@ -715,19 +727,19 @@
     // Color scheme
     $('color-scheme').addEventListener('change', (e) => {
       S.colorScheme = +e.target.value;
-      fetchRadar().catch(console.error);
+      rebuildRadarLayers();
     });
 
     // Smoothing
     $('smooth-toggle').addEventListener('change', (e) => {
       S.smooth = e.target.checked;
-      fetchRadar().catch(console.error);
+      rebuildRadarLayers();
     });
 
     // Forecast
     $('forecast-toggle').addEventListener('change', (e) => {
       S.showForecast = e.target.checked;
-      fetchRadar().catch(console.error);
+      rebuildRadarLayers();
     });
 
     // Alerts toggle
@@ -767,6 +779,25 @@
       });
     });
 
+    // Delegated click for alert cards — survives list re-renders.
+    $('alert-list').addEventListener('click', (e) => {
+      const card = e.target.closest('.alert-card');
+      if (!card) return;
+      const idx = +card.dataset.idx;
+      const a = filteredAlerts()[idx];
+      if (!a) return;
+      if (!a.layer) {
+        showToast('This alert has no map geometry');
+        return;
+      }
+      const b = a.layer.getBounds();
+      if (b.isValid()) {
+        S.map.fitBounds(b.pad(0.2), { maxZoom: 10, animate: true });
+        setTimeout(() => a.layer.openPopup(b.getCenter()), 350);
+      }
+      if (window.innerWidth < 768) collapseSheet();
+    });
+
     // Layers panel toggle
     $('layers-btn').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -774,27 +805,29 @@
       $('layers-panel').classList.toggle('open', S.layersOpen);
       $('layers-btn').classList.toggle('active', S.layersOpen);
     });
-    document.addEventListener('click', (e) => {
-      if (!S.layersOpen) return;
-      const panel = $('layers-panel');
-      const btn = $('layers-btn');
-      if (panel.contains(e.target) || btn.contains(e.target)) return;
-      S.layersOpen = false;
-      panel.classList.remove('open');
-      btn.classList.remove('active');
-    });
 
     // Search panel
     $('search-btn').addEventListener('click', (e) => {
       e.stopPropagation();
       if (S.searchOpen) closeSearch(); else openSearch();
     });
+
+    // Single outside-click handler closes whichever panel is open.
     document.addEventListener('click', (e) => {
-      if (!S.searchOpen) return;
-      const panel = $('search-panel');
-      const btn = $('search-btn');
-      if (panel.contains(e.target) || btn.contains(e.target)) return;
-      closeSearch();
+      if (S.layersOpen) {
+        const panel = $('layers-panel'), btn = $('layers-btn');
+        if (!panel.contains(e.target) && !btn.contains(e.target)) {
+          S.layersOpen = false;
+          panel.classList.remove('open');
+          btn.classList.remove('active');
+        }
+      }
+      if (S.searchOpen) {
+        const panel = $('search-panel'), btn = $('search-btn');
+        if (!panel.contains(e.target) && !btn.contains(e.target)) {
+          closeSearch();
+        }
+      }
     });
 
     const searchInput = $('search-input');
