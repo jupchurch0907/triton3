@@ -1,14 +1,14 @@
 // Triton Weather Radar — runtime configuration.
-// IMPORTANT: when you deploy this to Cloudflare Pages, domain-restrict your
-// MapTiler key in the MapTiler dashboard so it can only be used from your
-// production hostname. The key is visible to anyone who loads the page.
+// Base map is Carto + ESRI (keyless). The MapTiler key is retained only for
+// the geocoding API used by the address-search panel — domain-restrict it
+// in the MapTiler dashboard before deploying.
 window.TRITON_CONFIG = {
-  MAPTILER_KEY: "HndKYYtTX6F6AUPsnWJH",
-  MAPTILER_STYLE: "dataviz-dark", // dataviz-dark (neutral) | basic-v2-dark | streets-v2-dark
-  DEFAULT_CENTER: [35.22, -97.44],   // Norman, OK
+  MAPTILER_KEY: "HndKYYtTX6F6AUPsnWJH",  // address search only
+  BASE_STYLE: "dark",                    // dark | light | satellite
+  DEFAULT_CENTER: [35.22, -97.44],       // Norman, OK
   DEFAULT_ZOOM: 7,
   DEFAULT_STATE: "OK",
   ALERT_REFRESH_MS: 60_000,
   RADAR_REFRESH_MS: 5 * 60_000,
-  CONTACT: "jacobu2tech@gmail.com"    // sent in NWS Accept/User-Agent context
+  CONTACT: "jacobu2tech@gmail.com"       // sent in NWS Accept/User-Agent context
 };

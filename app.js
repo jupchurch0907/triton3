@@ -82,7 +82,13 @@
     labelsLayer: null,
     userLocMarker: null,
     userLocCircle: null,
-    baseStyle: CFG.MAPTILER_STYLE || 'dataviz-dark',
+    baseStyle: (function () {
+      // Accept the new keys; gracefully migrate the old MapTiler values that
+      // some installs may still have in config.js.
+      const v = CFG.BASE_STYLE || CFG.MAPTILER_STYLE || 'dark';
+      if (['dark', 'light', 'satellite'].includes(v)) return v;
+      return 'dark';
+    })(),
     radarData: null,          // cached RainViewer JSON
     radarLayers: [],          // [{layer, time, isFuture}]
     radarSig: null,           // fingerprint to skip no-op rebuilds
@@ -133,6 +139,9 @@
     showCounties: false,
     countiesLayer: null,
     countiesCache: {},        // state -> GeoJSON FeatureCollection
+
+    stateOutlinesData: null,  // FeatureCollection of all US states
+    stateBorderLayer: null,
 
     sheetExpanded: false,
     layersOpen: false,
@@ -222,6 +231,12 @@
     S.map.createPane('spcOutlookPane');
     S.map.getPane('spcOutlookPane').style.zIndex = 380;
 
+    // Selected-state outline — above SPC outlook and warnings so the
+    // glow always reads as the frame of the focused region.
+    S.map.createPane('stateBorderPane');
+    S.map.getPane('stateBorderPane').style.zIndex = 410;
+    S.map.getPane('stateBorderPane').style.pointerEvents = 'none';
+
     S.map.createPane('radarRingsPane');
     S.map.getPane('radarRingsPane').style.zIndex = 430;
     S.map.getPane('radarRingsPane').style.pointerEvents = 'none';
@@ -233,7 +248,6 @@
     S.map.getPane('stormReportsPane').style.zIndex = 480;
 
     setBaseStyle(S.baseStyle);
-    addLabelsOverlay();
 
     // Hide radar site labels at country-wide zoom to keep the map readable.
     const updateLabelZoomClass = () => {
@@ -254,61 +268,89 @@
     });
   }
 
-  function addLabelsOverlay() {
-    const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
-    S.labelsLayer = L.tileLayer(
-      `https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}${retina}.png`,
-      {
-        pane: 'labelsPane',
-        subdomains: 'abcd',
-        maxZoom: 18,
-        // Carto retina labels top out around z=18; keep one level of headroom
-        // so the upscaled view doesn't generate 404s at our map maxZoom.
-        maxNativeZoom: 17,
-        attribution: '<a href="https://carto.com/attributions" target="_blank">© Carto</a>',
-        crossOrigin: true,
-        errorTileUrl: BLANK_PNG,
-      }
-    ).addTo(S.map);
-  }
+  // Base map providers. We switched off MapTiler raster tiles because their
+  // free tier returns an "error PNG" (Zoom Level Not Supported text rendered
+  // into a valid 200-OK image) for certain style+zoom+retina combinations —
+  // which bypasses errorTileUrl and shows up on the map. Carto + ESRI World
+  // Imagery are free, keyless, and support z=0–19+ without these quirks.
+  const ATTRIB_CARTO = '<a href="https://carto.com/attributions" target="_blank">© Carto</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer';
+  const ATTRIB_ESRI = '<a href="https://www.esri.com/" target="_blank">© ESRI</a> · NWS · RainViewer';
 
-  // Per-style max native zoom for MapTiler raster + retina. Going past a
-  // style's supported zoom returns "Zoom Level Not Supported" (a 400 JSON
-  // response that fails the <img> decode). Cap conservatively here and let
-  // Leaflet upscale to the map's maxZoom.
-  const MAPTILER_MAX_NATIVE_ZOOM = {
-    'dataviz-dark': 16,
-    'streets-v2-dark': 17,
-    'basic-v2-dark': 17,
-    'hybrid': 17,
-    'satellite': 17,
+  const BASE_STYLES = {
+    dark: {
+      base:   'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png',
+      labels: 'https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',
+      subdomains: 'abcd',
+      retina: true,
+      attribution: ATTRIB_CARTO,
+      maxNative: 19,
+    },
+    light: {
+      base:   'https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png',
+      labels: 'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png',
+      subdomains: 'abcd',
+      retina: true,
+      attribution: ATTRIB_CARTO,
+      maxNative: 19,
+    },
+    satellite: {
+      // ESRI World Imagery + a transparent labels-and-boundaries overlay
+      // designed to read against satellite imagery.
+      base:   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      labels: 'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+      subdomains: '',
+      retina: false,
+      attribution: ATTRIB_ESRI,
+      maxNative: 19,
+    },
   };
 
+  function buildTileUrl(template, retinaEnabled) {
+    const r = (retinaEnabled && (window.devicePixelRatio || 1) > 1.4) ? '@2x' : '';
+    return template.replace('{r}', r);
+  }
+
   function setBaseStyle(styleId) {
+    const style = BASE_STYLES[styleId] || BASE_STYLES.dark;
     S.baseStyle = styleId;
-    const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
-    // Satellite/hybrid use jpg; vector-derived dark styles use png
-    const ext = (styleId === 'satellite' || styleId === 'hybrid') ? 'jpg' : 'png';
-    const url = `https://api.maptiler.com/maps/${styleId}/{z}/{x}/{y}${retina}.${ext}?key=${CFG.MAPTILER_KEY}`;
-    const maxNative = MAPTILER_MAX_NATIVE_ZOOM[styleId] ?? 16;
-    const newLayer = L.tileLayer(url, {
-      attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
+
+    // --- BASE layer ---
+    const newBase = L.tileLayer(buildTileUrl(style.base, style.retina), {
+      attribution: style.attribution,
       maxZoom: 18,
-      maxNativeZoom: maxNative,
+      maxNativeZoom: style.maxNative,
+      subdomains: style.subdomains,
       crossOrigin: true,
       zIndex: 1,
       errorTileUrl: BLANK_PNG,
     });
-    newLayer.addTo(S.map);
-    const old = S.baseLayer;
-    S.baseLayer = newLayer;
-    // Cancel any pending removal so rapid style switches don't leak layers.
+    newBase.addTo(S.map);
+
+    const oldBase = S.baseLayer;
+    S.baseLayer = newBase;
     if (S.baseSwapTimer) clearTimeout(S.baseSwapTimer);
-    if (old) {
+    if (oldBase) {
       S.baseSwapTimer = setTimeout(() => {
-        S.map.removeLayer(old);
+        S.map.removeLayer(oldBase);
         S.baseSwapTimer = null;
       }, 250);
+    }
+
+    // --- LABELS overlay (matches the base palette) ---
+    const newLabels = L.tileLayer(buildTileUrl(style.labels, style.retina), {
+      pane: 'labelsPane',
+      maxZoom: 18,
+      maxNativeZoom: style.maxNative,
+      subdomains: style.subdomains,
+      crossOrigin: true,
+      errorTileUrl: BLANK_PNG,
+    });
+    newLabels.addTo(S.map);
+
+    const oldLabels = S.labelsLayer;
+    S.labelsLayer = newLabels;
+    if (oldLabels) {
+      setTimeout(() => S.map.removeLayer(oldLabels), 250);
     }
   }
 
@@ -325,6 +367,7 @@
       // framed the view. flyTo: false avoids the alert layer overriding us.
       fetchAlerts(false);
       if (S.showCounties) fetchCounties(S.state);
+      renderStateBorder();
     });
   }
 
@@ -1027,6 +1070,51 @@
     }).addTo(S.map);
   }
 
+  // -------------------- selected-state border highlight --------------------
+  // STATE code -> full name lookup, derived from the same STATES table
+  // that populates the dropdown.
+  const STATE_NAMES = STATES.reduce((m, [code, name]) => { m[code] = name; return m; }, {});
+
+  async function fetchStateOutlines() {
+    if (S.stateOutlinesData) return;
+    try {
+      // Long-stable public GeoJSON of US state polygons (~250 KB).
+      const r = await fetch('https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json');
+      if (!r.ok) throw new Error('state outlines ' + r.status);
+      S.stateOutlinesData = await r.json();
+    } catch (e) {
+      console.warn('state outlines fetch failed', e);
+    }
+  }
+
+  async function renderStateBorder() {
+    if (S.stateBorderLayer) {
+      S.map.removeLayer(S.stateBorderLayer);
+      S.stateBorderLayer = null;
+    }
+    if (!S.stateOutlinesData) await fetchStateOutlines();
+    if (!S.stateOutlinesData) return;
+
+    const targetName = STATE_NAMES[S.state];
+    if (!targetName) return;
+    const feature = (S.stateOutlinesData.features || []).find(
+      f => (f.properties?.name || '').toLowerCase() === targetName.toLowerCase()
+    );
+    if (!feature) return;
+
+    S.stateBorderLayer = L.geoJSON(feature, {
+      pane: 'stateBorderPane',
+      interactive: false,
+      style: {
+        color: '#ffb300',
+        weight: 2.5,
+        opacity: 0.9,
+        fill: false,
+        className: 'state-border-outline',
+      },
+    }).addTo(S.map);
+  }
+
   // -------------------- search + pin --------------------
   async function geocode(query) {
     if (S.searchAbort) S.searchAbort.abort();
@@ -1531,6 +1619,7 @@
     if (S.showSpcOutlook) fetchSpcOutlook();
     if (S.showSpcWatches) fetchSpcWatches();
     startSpcRefresh();
+    renderStateBorder();
   }
 
   if (document.readyState === 'loading') {

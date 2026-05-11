@@ -519,6 +519,20 @@ body.zoomed-out .radar-site .rs-sweep { display: none; }
   filter: drop-shadow(0 0 5px currentColor);
 }
 
+/* Selected-state border — amber glow that pulses slowly so the focused
+   region reads as the "current frame" without competing with alerts. */
+.state-border-outline {
+  filter: drop-shadow(0 0 4px var(--accent)) drop-shadow(0 0 10px var(--accent-glow));
+  animation: state-border-pulse 4s ease-in-out infinite;
+}
+@keyframes state-border-pulse {
+  0%, 100% { stroke-opacity: 0.95; }
+  50%      { stroke-opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .state-border-outline { animation: none; }
+}
+
 .radar-site-label {
   background: rgba(10, 10, 10, 0.78) !important;
   border: 1px solid rgba(255, 179, 0, 0.45) !important;
