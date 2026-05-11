@@ -404,6 +404,27 @@ select option:checked {
   font-style: italic;
 }
 
+/* ============================================================
+   NEXRAD RADAR SITES
+   ============================================================ */
+.radar-site-label {
+  background: rgba(10, 10, 10, 0.78) !important;
+  border: 1px solid rgba(255, 179, 0, 0.45) !important;
+  color: #ffd56a !important;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.06em !important;
+  padding: 1px 5px !important;
+  border-radius: 4px !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.55) !important;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.radar-site-label::before { display: none !important; } /* kill default tooltip arrow */
+/* Hide site labels at country-wide zoom so the map isn't carpeted with text */
+body.zoomed-out .radar-site-label { display: none; }
+
 /* User location dot (blue, slow pulse) — drops when "Locate me" succeeds.
    Built so the dot stays visible even if a CSS regression hits the pulse. */
 .user-location-dot {
@@ -411,10 +432,24 @@ select option:checked {
   border: none;
   pointer-events: none;
 }
+.user-location-dot .ulp-dot,
 .user-location-dot .ulp-pulse {
   position: absolute;
-  inset: 0;
+  display: block;
+  top: 0;
+  left: 0;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
+  box-sizing: border-box;
+}
+.user-location-dot .ulp-dot {
+  background: #2196f3;
+  border: 3px solid #ffffff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.7), 0 0 12px rgba(33,150,243,0.7);
+  z-index: 2;
+}
+.user-location-dot .ulp-pulse {
   background: rgba(33, 150, 243, 0.55);
   animation: user-loc-pulse 2.4s ease-out infinite;
   z-index: 1;
@@ -1086,25 +1121,53 @@ input[type=range]::-moz-range-thumb {
 
 /* ============================================================
    DESKTOP / TABLET (≥768px)
+   - Sheet sits on the right and is dismissable. When it's visible
+     the rail / panels / timeline shift LEFT so they aren't covered.
+     When the user closes the sheet (body.sheet-hidden), everything
+     returns to the right edge.
    ============================================================ */
 @media (min-width: 768px) {
   .top-bar {
     left: calc(16px + var(--safe-left));
     right: auto;
-    width: 360px;
+    width: 380px;
+    padding: 10px 14px;
+    height: 58px;
   }
+  .brand-name { font-size: 13px; }
+  .state-select { font-size: 14px; padding: 9px 28px 9px 12px; }
+  .alert-count { height: 42px; }
+  .alert-count-num { font-size: 18px; }
+
   .rail {
-    right: calc(16px + var(--safe-right));
+    right: calc(360px + var(--safe-right));
     top: calc(82px + var(--safe-top));
+    transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
+  body.sheet-hidden .rail {
+    right: calc(16px + var(--safe-right));
+  }
+
+  .search-panel,
   .layers-panel {
+    right: calc(412px + var(--safe-right));
+    transition: opacity 0.18s, transform 0.18s, right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  body.sheet-hidden .search-panel,
+  body.sheet-hidden .layers-panel {
     right: calc(68px + var(--safe-right));
   }
+
   .timeline {
     left: calc(16px + var(--safe-left));
     right: calc(360px + var(--safe-right));
     bottom: calc(16px + var(--safe-bottom));
+    transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
+  body.sheet-hidden .timeline {
+    right: calc(16px + var(--safe-right));
+  }
+
   .alert-sheet {
     top: calc(82px + var(--safe-top));
     right: calc(16px + var(--safe-right));
@@ -1115,9 +1178,15 @@ input[type=range]::-moz-range-thumb {
     height: auto !important;
     border: 1px solid var(--glass-border);
     padding-bottom: 0;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s;
+  }
+  body.sheet-hidden .alert-sheet {
+    transform: translateX(calc(100% + 24px));
+    opacity: 0;
+    pointer-events: none;
   }
   .alert-sheet .sheet-handle-bar { display: none; }
-  .alert-sheet .sheet-close { display: none !important; }
+  .alert-sheet .sheet-close { display: flex !important; }
   .alert-sheet .sheet-handle { padding-top: 14px; cursor: default; }
   .alert-sheet .sheet-filters { opacity: 1; pointer-events: auto; }
   .alert-sheet .sheet-list { opacity: 1; }
@@ -1127,4 +1196,5 @@ input[type=range]::-moz-range-thumb {
 /* Wider screens — keep timeline from getting absurdly long */
 @media (min-width: 1400px) {
   .timeline { right: calc(360px + var(--safe-right)); max-width: none; }
+  body.sheet-hidden .timeline { right: calc(16px + var(--safe-right)); }
 }

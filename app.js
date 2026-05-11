@@ -73,6 +73,10 @@
     filter: 'all',
     state: CFG.DEFAULT_STATE || 'OK',
 
+    showRadarSites: true,
+    radarSitesData: null,
+    radarSitesLayer: null,
+
     sheetExpanded: false,
     layersOpen: false,
     searchOpen: false,
@@ -131,7 +135,7 @@
       attributionControl: true,
       worldCopyJump: true,
       zoomSnap: 1,
-      maxZoom: 16,
+      maxZoom: 18,
       minZoom: 3,
     }).setView(CFG.DEFAULT_CENTER, CFG.DEFAULT_ZOOM);
 
@@ -144,8 +148,20 @@
     S.map.getPane('labelsPane').style.zIndex = 350;
     S.map.getPane('labelsPane').style.pointerEvents = 'none';
 
+    // Pane for NEXRAD radar sites — above alert polygons (overlayPane=400)
+    // and below the popup pane so click popups still work.
+    S.map.createPane('radarSitesPane');
+    S.map.getPane('radarSitesPane').style.zIndex = 450;
+
     setBaseStyle(S.baseStyle);
     addLabelsOverlay();
+
+    // Hide radar site labels at country-wide zoom to keep the map readable.
+    const updateLabelZoomClass = () => {
+      document.body.classList.toggle('zoomed-out', S.map.getZoom() < 6);
+    };
+    S.map.on('zoomend', updateLabelZoomClass);
+    updateLabelZoomClass();
 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
@@ -164,8 +180,8 @@
       {
         pane: 'labelsPane',
         subdomains: 'abcd',
-        maxZoom: 16,
-        maxNativeZoom: 16,
+        maxZoom: 18,
+        maxNativeZoom: 18,
         attribution: '<a href="https://carto.com/attributions" target="_blank">© Carto</a>',
         crossOrigin: true,
         errorTileUrl: BLANK_PNG,
@@ -181,8 +197,8 @@
     const url = `https://api.maptiler.com/maps/${styleId}/{z}/{x}/{y}${retina}.${ext}?key=${CFG.MAPTILER_KEY}`;
     const newLayer = L.tileLayer(url, {
       attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
-      maxZoom: 16,
-      maxNativeZoom: 16,
+      maxZoom: 18,
+      maxNativeZoom: 18,
       crossOrigin: true,
       zIndex: 1,
       errorTileUrl: BLANK_PNG,
@@ -271,15 +287,19 @@
     if (!frames.length) return;
 
     for (const f of frames) {
-      const url = `${S.radarHost}${f.path}/256/{z}/{x}/{y}/${S.colorScheme}/${S.smooth ? 1 : 0}_1.png`;
+      // 512px tiles give double pixel density (sharper at every zoom level)
+      // for the same network cost as 256px @2x. tileSize:512 tells Leaflet
+      // each tile is 512 CSS px.
+      const url = `${S.radarHost}${f.path}/512/{z}/{x}/{y}/${S.colorScheme}/${S.smooth ? 1 : 0}_1.png`;
       const layer = L.tileLayer(url, {
+        tileSize: 512,
         opacity: 0,
         zIndex: 200,
         crossOrigin: true,
         // RainViewer publishes radar tiles only up to native zoom 12 — let
         // Leaflet upscale the highest available tile at deeper zooms instead
         // of returning 404s.
-        maxZoom: 16,
+        maxZoom: 18,
         maxNativeZoom: 12,
         minNativeZoom: 1,
         errorTileUrl: BLANK_PNG,
@@ -509,6 +529,67 @@
       </div>`;
   }
 
+  // -------------------- NEXRAD radar sites --------------------
+  async function fetchRadarSites() {
+    if (S.radarSitesData) { renderRadarSites(); return; }
+    try {
+      const r = await fetch('https://api.weather.gov/radar/stations', {
+        headers: { 'Accept': 'application/geo+json' },
+      });
+      if (!r.ok) throw new Error('radar stations ' + r.status);
+      S.radarSitesData = await r.json();
+      renderRadarSites();
+    } catch (e) {
+      console.warn('radar sites fetch failed', e);
+    }
+  }
+
+  function renderRadarSites() {
+    if (S.radarSitesLayer) {
+      S.map.removeLayer(S.radarSitesLayer);
+      S.radarSitesLayer = null;
+    }
+    if (!S.showRadarSites || !S.radarSitesData) return;
+
+    const group = L.layerGroup();
+    for (const f of S.radarSitesData.features || []) {
+      if (!f.geometry || f.geometry.type !== 'Point') continue;
+      const [lng, lat] = f.geometry.coordinates;
+      const id = f.properties?.id || '';
+      const name = f.properties?.name || '';
+      const type = f.properties?.stationType || '';
+      const isTDWR = type === 'TDWR';
+
+      const marker = L.circleMarker([lat, lng], {
+        radius: 4,
+        color: '#ffffff',
+        weight: 1.4,
+        fillColor: isTDWR ? '#00b0ff' : '#ffb300',
+        fillOpacity: 0.95,
+        pane: 'radarSitesPane',
+      });
+      marker.bindTooltip(id, {
+        permanent: true,
+        direction: 'right',
+        offset: [6, 0],
+        className: 'radar-site-label',
+        pane: 'radarSitesPane',
+      });
+      marker.bindPopup(
+        `<div class="popup-event" style="--popup-color:${isTDWR ? '#00b0ff' : '#ffb300'}">${escapeHtml(id)}</div>` +
+        `<div class="popup-headline">${escapeHtml(name)}</div>` +
+        `<div class="popup-meta">` +
+          `<div><strong>Type:</strong> ${escapeHtml(type)}</div>` +
+          `<div><strong>Lat/Lon:</strong> ${lat.toFixed(3)}, ${lng.toFixed(3)}</div>` +
+        `</div>`,
+        { maxWidth: 260 }
+      );
+      group.addLayer(marker);
+    }
+    S.radarSitesLayer = group;
+    S.radarSitesLayer.addTo(S.map);
+  }
+
   // -------------------- search + pin --------------------
   async function geocode(query) {
     if (S.searchAbort) S.searchAbort.abort();
@@ -601,26 +682,13 @@
       interactive: false,
     }).addTo(S.map);
 
-    // The pulsing dot itself — built with inline styles so a CSS
-    // regression can't make it invisible. The pulse ring still uses a
-    // CSS class so it can animate.
     if (S.userLocMarker) {
       S.userLocMarker.setLatLng([lat, lng]);
       return;
     }
     const icon = L.divIcon({
       className: 'user-location-dot',
-      html: `
-        <div class="ulp-pulse"></div>
-        <div style="
-          position:absolute; inset:0;
-          border-radius:50%;
-          background:#2196f3;
-          border:3px solid #ffffff;
-          box-sizing:border-box;
-          box-shadow: 0 0 4px rgba(0,0,0,0.7), 0 0 12px rgba(33,150,243,0.7);
-          z-index: 2;
-        "></div>`,
+      html: '<span class="ulp-pulse"></span><span class="ulp-dot"></span>',
       iconSize: [18, 18],
       iconAnchor: [9, 9],
     });
@@ -628,7 +696,7 @@
       icon,
       interactive: false,
       keyboard: false,
-      zIndexOffset: 1000,
+      zIndexOffset: 10000,
     }).addTo(S.map);
   }
 
@@ -750,20 +818,39 @@
       else S.map.removeLayer(S.alertLayer);
     });
 
-    // Bottom sheet handle (mobile)
+    // Radar sites toggle
+    const sitesToggle = $('sites-toggle');
+    if (sitesToggle) {
+      sitesToggle.addEventListener('change', (e) => {
+        S.showRadarSites = e.target.checked;
+        if (S.showRadarSites && !S.radarSitesData) {
+          fetchRadarSites();
+        } else {
+          renderRadarSites();
+        }
+      });
+    }
+
+    // Bottom sheet handle (mobile only — on desktop the sheet is a side
+    // panel that's dismissed via the X close button).
     $('sheet-handle').addEventListener('click', () => {
       if (window.innerWidth >= 768) return;
       toggleSheet();
     });
     $('sheet-close').addEventListener('click', (e) => {
       e.stopPropagation();
-      collapseSheet();
+      if (window.innerWidth >= 768) {
+        document.body.classList.add('sheet-hidden');
+      } else {
+        collapseSheet();
+      }
     });
 
-    // Top-bar alert pill
+    // Top-bar alert pill: on desktop toggles the side panel; on mobile
+    // toggles the expanded bottom sheet.
     $('alert-count').addEventListener('click', () => {
       if (window.innerWidth >= 768) {
-        $('alert-list').scrollTop = 0;
+        document.body.classList.toggle('sheet-hidden');
       } else {
         if (S.sheetExpanded) collapseSheet(); else expandSheet();
       }
@@ -918,6 +1005,7 @@
     initRadar();
     fetchAlerts(false);
     startAlertRefresh();
+    fetchRadarSites();
   }
 
   if (document.readyState === 'loading') {
