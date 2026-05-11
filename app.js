@@ -76,6 +76,30 @@
     showRadarSites: true,
     radarSitesData: null,
     radarSitesLayer: null,
+    radarSiteMarkers: {},     // id -> Leaflet marker (for selection updates)
+    selectedSiteId: null,
+
+    showCoverageRings: false,
+    coverageRingsLayer: null,
+
+    showSpcOutlook: true,
+    spcOutlookData: null,
+    spcOutlookLayer: null,
+    spcOutlookTimer: null,
+
+    showSpcWatches: true,
+    spcWatchesData: null,
+    spcWatchesLayer: null,
+    spcWatchesAbort: null,
+    spcWatchesTimer: null,
+
+    showStormReports: false,
+    stormReportsLayer: null,
+    stormReportsTimer: null,
+
+    showCounties: false,
+    countiesLayer: null,
+    countiesCache: {},        // state -> GeoJSON FeatureCollection
 
     sheetExpanded: false,
     layersOpen: false,
@@ -148,10 +172,32 @@
     S.map.getPane('labelsPane').style.zIndex = 350;
     S.map.getPane('labelsPane').style.pointerEvents = 'none';
 
-    // Pane for NEXRAD radar sites — above alert polygons (overlayPane=400)
-    // and below the popup pane so click popups still work.
+    // Custom pane stacking order (top of stack at bottom of list):
+    //   200 tilePane (base + radar)
+    //   320 countiesPane         — faint county outlines
+    //   350 labelsPane           — city names
+    //   380 spcOutlookPane       — Day-1 categorical risk polygons
+    //   400 overlayPane          — NWS warnings + SPC watches
+    //   430 radarRingsPane       — WSR-88D / TDWR coverage circles
+    //   450 radarSitesPane       — NEXRAD dots + sweep wedges
+    //   480 stormReportsPane     — tornado / hail / wind dots
+    //   600 markerPane           — user location, search pin
+    S.map.createPane('countiesPane');
+    S.map.getPane('countiesPane').style.zIndex = 320;
+    S.map.getPane('countiesPane').style.pointerEvents = 'none';
+
+    S.map.createPane('spcOutlookPane');
+    S.map.getPane('spcOutlookPane').style.zIndex = 380;
+
+    S.map.createPane('radarRingsPane');
+    S.map.getPane('radarRingsPane').style.zIndex = 430;
+    S.map.getPane('radarRingsPane').style.pointerEvents = 'none';
+
     S.map.createPane('radarSitesPane');
     S.map.getPane('radarSitesPane').style.zIndex = 450;
+
+    S.map.createPane('stormReportsPane');
+    S.map.getPane('stormReportsPane').style.zIndex = 480;
 
     setBaseStyle(S.baseStyle);
     addLabelsOverlay();
@@ -169,6 +215,8 @@
       } else {
         if (S.playing) startAnim();
         fetchAlerts(false);
+        if (S.showSpcWatches) fetchSpcWatches();
+        if (S.showStormReports) fetchStormReports();
       }
     });
   }
@@ -181,7 +229,9 @@
         pane: 'labelsPane',
         subdomains: 'abcd',
         maxZoom: 18,
-        maxNativeZoom: 18,
+        // Carto retina labels top out around z=18; keep one level of headroom
+        // so the upscaled view doesn't generate 404s at our map maxZoom.
+        maxNativeZoom: 17,
         attribution: '<a href="https://carto.com/attributions" target="_blank">© Carto</a>',
         crossOrigin: true,
         errorTileUrl: BLANK_PNG,
@@ -189,16 +239,29 @@
     ).addTo(S.map);
   }
 
+  // Per-style max native zoom for MapTiler raster + retina. Going past a
+  // style's supported zoom returns "Zoom Level Not Supported" (a 400 JSON
+  // response that fails the <img> decode). Cap conservatively here and let
+  // Leaflet upscale to the map's maxZoom.
+  const MAPTILER_MAX_NATIVE_ZOOM = {
+    'dataviz-dark': 16,
+    'streets-v2-dark': 17,
+    'basic-v2-dark': 17,
+    'hybrid': 17,
+    'satellite': 17,
+  };
+
   function setBaseStyle(styleId) {
     S.baseStyle = styleId;
     const retina = (window.devicePixelRatio || 1) > 1.4 ? '@2x' : '';
     // Satellite/hybrid use jpg; vector-derived dark styles use png
     const ext = (styleId === 'satellite' || styleId === 'hybrid') ? 'jpg' : 'png';
     const url = `https://api.maptiler.com/maps/${styleId}/{z}/{x}/{y}${retina}.${ext}?key=${CFG.MAPTILER_KEY}`;
+    const maxNative = MAPTILER_MAX_NATIVE_ZOOM[styleId] ?? 16;
     const newLayer = L.tileLayer(url, {
       attribution: '<a href="https://www.maptiler.com/copyright/" target="_blank">© MapTiler</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank">© OSM</a> · NWS · RainViewer',
       maxZoom: 18,
-      maxNativeZoom: 18,
+      maxNativeZoom: maxNative,
       crossOrigin: true,
       zIndex: 1,
       errorTileUrl: BLANK_PNG,
@@ -225,6 +288,7 @@
     sel.addEventListener('change', (e) => {
       S.state = e.target.value;
       fetchAlerts(true);
+      if (S.showCounties) fetchCounties(S.state);
     });
   }
 
@@ -549,6 +613,7 @@
       S.map.removeLayer(S.radarSitesLayer);
       S.radarSitesLayer = null;
     }
+    S.radarSiteMarkers = {};
     if (!S.showRadarSites || !S.radarSitesData) return;
 
     const group = L.layerGroup();
@@ -559,35 +624,356 @@
       const name = f.properties?.name || '';
       const type = f.properties?.stationType || '';
       const isTDWR = type === 'TDWR';
+      const cls = isTDWR ? 'tdwr' : 'wsr';
+      const color = isTDWR ? '#00b0ff' : '#ffb300';
 
-      const marker = L.circleMarker([lat, lng], {
-        radius: 4,
-        color: '#ffffff',
-        weight: 1.4,
-        fillColor: isTDWR ? '#00b0ff' : '#ffb300',
-        fillOpacity: 0.95,
+      // The marker is a divIcon containing a rotating sweep wedge + a fixed
+      // center dot. The wedge mirrors the rotating dish on a real Doppler
+      // radar — RPM matched to type (WSR-88D ~5 RPM = 12s/rev, TDWR ~30 RPM
+      // = 3s/rev). The sweep is screen-pixel sized, not geographic, so it
+      // stays a comfortable size at any zoom.
+      const icon = L.divIcon({
+        className: `radar-site radar-site-${cls}` + (id === S.selectedSiteId ? ' selected' : ''),
+        html:
+          '<div class="rs-sweep"></div>' +
+          '<div class="rs-dot"></div>',
+        iconSize: [40, 40],
+        iconAnchor: [20, 20],
+      });
+      const marker = L.marker([lat, lng], {
+        icon,
         pane: 'radarSitesPane',
+        keyboard: false,
+        riseOnHover: false,
       });
       marker.bindTooltip(id, {
         permanent: true,
         direction: 'right',
-        offset: [6, 0],
+        offset: [10, 0],
         className: 'radar-site-label',
         pane: 'radarSitesPane',
       });
       marker.bindPopup(
-        `<div class="popup-event" style="--popup-color:${isTDWR ? '#00b0ff' : '#ffb300'}">${escapeHtml(id)}</div>` +
+        `<div class="popup-event" style="--popup-color:${color}">${escapeHtml(id)}</div>` +
         `<div class="popup-headline">${escapeHtml(name)}</div>` +
         `<div class="popup-meta">` +
           `<div><strong>Type:</strong> ${escapeHtml(type)}</div>` +
+          `<div><strong>Range:</strong> ~${isTDWR ? 90 : 230} km useful</div>` +
           `<div><strong>Lat/Lon:</strong> ${lat.toFixed(3)}, ${lng.toFixed(3)}</div>` +
         `</div>`,
         { maxWidth: 260 }
       );
+      // Click → select this site: fly + highlight + show its coverage ring.
+      marker.on('click', () => selectRadarSite(id, lat, lng, isTDWR));
       group.addLayer(marker);
+      S.radarSiteMarkers[id] = { marker, lat, lng, isTDWR, name, type, id };
     }
     S.radarSitesLayer = group;
     S.radarSitesLayer.addTo(S.map);
+    // Re-render the coverage rings on top of fresh markers so toggles +
+    // selection stay consistent.
+    renderCoverageRings();
+  }
+
+  function selectRadarSite(id, lat, lng, isTDWR) {
+    const prevId = S.selectedSiteId;
+    S.selectedSiteId = id;
+
+    // Swap "selected" class on the old + new markers.
+    const restyle = (siteId) => {
+      const rec = S.radarSiteMarkers[siteId];
+      if (!rec) return;
+      const el = rec.marker.getElement();
+      if (!el) return;
+      el.classList.toggle('selected', siteId === id);
+    };
+    if (prevId && prevId !== id) restyle(prevId);
+    restyle(id);
+
+    // Fly to the site and bring the popup forward. Use zoom 9 if we're
+    // currently zoomed out — gives a useful view of the ring; otherwise
+    // preserve the user's zoom.
+    const targetZoom = Math.max(S.map.getZoom(), 9);
+    S.map.flyTo([lat, lng], targetZoom, { duration: 1.0 });
+
+    // If coverage rings are off, still draw THIS site's ring while selected.
+    renderCoverageRings();
+  }
+
+  // Draws coverage circles around radar sites. If `showCoverageRings` is on,
+  // every site gets a faint ring; the selected site (if any) gets a brighter
+  // one. When the global toggle is off, only the selected site's ring shows.
+  function renderCoverageRings() {
+    if (S.coverageRingsLayer) {
+      S.map.removeLayer(S.coverageRingsLayer);
+      S.coverageRingsLayer = null;
+    }
+    if (!S.radarSitesData) return;
+
+    const group = L.layerGroup();
+    for (const f of S.radarSitesData.features || []) {
+      if (!f.geometry || f.geometry.type !== 'Point') continue;
+      const [lng, lat] = f.geometry.coordinates;
+      const id = f.properties?.id;
+      const isTDWR = f.properties?.stationType === 'TDWR';
+      const isSelected = id === S.selectedSiteId;
+      if (!S.showCoverageRings && !isSelected) continue;
+
+      const baseColor = isTDWR ? '#00b0ff' : '#ffb300';
+      const ring = L.circle([lat, lng], {
+        radius: (isTDWR ? 90 : 230) * 1000, // km → meters
+        color: baseColor,
+        weight: isSelected ? 2 : 1,
+        opacity: isSelected ? 0.85 : 0.35,
+        fillColor: baseColor,
+        fillOpacity: isSelected ? 0.06 : 0.02,
+        dashArray: isSelected ? null : '4 4',
+        pane: 'radarRingsPane',
+        interactive: false,
+      });
+      group.addLayer(ring);
+    }
+    S.coverageRingsLayer = group;
+    S.coverageRingsLayer.addTo(S.map);
+  }
+
+  // -------------------- SPC Day 1 categorical outlook --------------------
+  // Standard SPC risk colors (RGB sRGB approximations of their pubs).
+  const SPC_OUTLOOK_COLORS = {
+    TSTM: '#c0e8c0', // General thunder (pale green)
+    MRGL: '#7fc97f', // Marginal
+    SLGT: '#f6f67f', // Slight (yellow)
+    ENH:  '#e6c27e', // Enhanced (orange)
+    MDT:  '#e07f7f', // Moderate (red)
+    HIGH: '#ff80ff', // High (magenta)
+  };
+  const SPC_OUTLOOK_LABELS = {
+    TSTM: 'General Thunder', MRGL: 'Marginal Risk', SLGT: 'Slight Risk',
+    ENH: 'Enhanced Risk', MDT: 'Moderate Risk', HIGH: 'High Risk',
+  };
+
+  async function fetchSpcOutlook() {
+    try {
+      const r = await fetch('https://www.spc.noaa.gov/products/outlook/day1otlk_cat.lyr.geojson', {
+        cache: 'no-store',
+      });
+      if (!r.ok) throw new Error('SPC outlook ' + r.status);
+      S.spcOutlookData = await r.json();
+      renderSpcOutlook();
+    } catch (e) {
+      console.warn('SPC outlook fetch failed', e);
+    }
+  }
+
+  function renderSpcOutlook() {
+    if (S.spcOutlookLayer) { S.map.removeLayer(S.spcOutlookLayer); S.spcOutlookLayer = null; }
+    if (!S.showSpcOutlook || !S.spcOutlookData) return;
+
+    S.spcOutlookLayer = L.geoJSON(S.spcOutlookData, {
+      pane: 'spcOutlookPane',
+      style: (f) => {
+        const label = (f.properties?.LABEL || '').toUpperCase();
+        const color = SPC_OUTLOOK_COLORS[label] || '#7fc97f';
+        const isTSTM = label === 'TSTM';
+        return {
+          color,
+          weight: 1.6,
+          opacity: 0.85,
+          fillColor: color,
+          fillOpacity: isTSTM ? 0.10 : 0.20,
+        };
+      },
+      onEachFeature: (f, layer) => {
+        const label = (f.properties?.LABEL || '').toUpperCase();
+        const human = SPC_OUTLOOK_LABELS[label] || label;
+        layer.bindPopup(
+          `<div class="popup-event" style="--popup-color:${SPC_OUTLOOK_COLORS[label] || '#7fc97f'}">${escapeHtml(human)}</div>` +
+          `<div class="popup-headline">SPC Day 1 Convective Outlook</div>` +
+          `<div class="popup-meta"><div><strong>Category:</strong> ${escapeHtml(label)}</div></div>`,
+          { maxWidth: 260 }
+        );
+      },
+    }).addTo(S.map);
+  }
+
+  // -------------------- SPC active watches --------------------
+  async function fetchSpcWatches() {
+    if (S.spcWatchesAbort) S.spcWatchesAbort.abort();
+    S.spcWatchesAbort = new AbortController();
+    try {
+      const url = 'https://api.weather.gov/alerts/active?event=Tornado%20Watch,Severe%20Thunderstorm%20Watch';
+      const r = await fetch(url, {
+        headers: { 'Accept': 'application/geo+json' },
+        cache: 'no-store',
+        signal: S.spcWatchesAbort.signal,
+      });
+      if (!r.ok) throw new Error('SPC watches ' + r.status);
+      S.spcWatchesData = await r.json();
+      renderSpcWatches();
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('SPC watches fetch failed', e);
+    }
+  }
+
+  function renderSpcWatches() {
+    if (S.spcWatchesLayer) { S.map.removeLayer(S.spcWatchesLayer); S.spcWatchesLayer = null; }
+    if (!S.showSpcWatches || !S.spcWatchesData) return;
+
+    const polyFeatures = (S.spcWatchesData.features || []).filter(f => f.geometry);
+    S.spcWatchesLayer = L.geoJSON(polyFeatures, {
+      pane: 'overlayPane',
+      style: (f) => {
+        const isTor = (f.properties?.event || '').toLowerCase().includes('tornado');
+        const color = isTor ? '#ff1744' : '#ffd600';
+        return {
+          color,
+          weight: 2.5,
+          opacity: 0.95,
+          fillColor: color,
+          fillOpacity: 0.04,
+          dashArray: '6 4',
+          className: 'spc-watch-polygon',
+        };
+      },
+      onEachFeature: (f, layer) => {
+        const p = f.properties || {};
+        const isTor = (p.event || '').toLowerCase().includes('tornado');
+        const color = isTor ? '#ff1744' : '#ffd600';
+        layer.bindPopup(
+          `<div class="popup-event" style="--popup-color:${color}">${escapeHtml(p.event || 'Watch')}</div>` +
+          (p.headline ? `<div class="popup-headline">${escapeHtml(p.headline)}</div>` : '') +
+          `<div class="popup-meta">` +
+            `<div><strong>Area:</strong> ${escapeHtml(p.areaDesc || '')}</div>` +
+            `<div><strong>From:</strong> ${fmtDateTime(p.onset || p.effective)}</div>` +
+            `<div><strong>Until:</strong> ${fmtDateTime(p.ends || p.expires)}</div>` +
+          `</div>`,
+          { maxWidth: 320 }
+        );
+      },
+    }).addTo(S.map);
+  }
+
+  // -------------------- SPC storm reports (today) --------------------
+  // Tiny CSV parser sufficient for SPC's day-files. Handles quoted fields.
+  function parseCsv(text) {
+    const lines = text.replace(/\r/g, '').split('\n').filter(Boolean);
+    if (!lines.length) return [];
+    const headers = splitCsvLine(lines[0]);
+    return lines.slice(1).map(line => {
+      const cols = splitCsvLine(line);
+      const row = {};
+      headers.forEach((h, i) => { row[h] = cols[i] ?? ''; });
+      return row;
+    });
+  }
+  function splitCsvLine(line) {
+    const out = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { inQ = !inQ; continue; }
+      if (c === ',' && !inQ) { out.push(cur); cur = ''; continue; }
+      cur += c;
+    }
+    out.push(cur);
+    return out;
+  }
+
+  async function fetchStormReports() {
+    const base = 'https://www.spc.noaa.gov/climo/reports/';
+    const types = [
+      { file: 'today_torn.csv', kind: 'tornado' },
+      { file: 'today_hail.csv', kind: 'hail' },
+      { file: 'today_wind.csv', kind: 'wind' },
+    ];
+    try {
+      const results = await Promise.all(types.map(t =>
+        fetch(base + t.file, { cache: 'no-store' })
+          .then(r => r.ok ? r.text() : '')
+          .then(text => ({ kind: t.kind, rows: parseCsv(text) }))
+          .catch(() => ({ kind: t.kind, rows: [] }))
+      ));
+      renderStormReports(results);
+    } catch (e) {
+      console.warn('storm reports fetch failed', e);
+    }
+  }
+
+  function renderStormReports(buckets) {
+    if (S.stormReportsLayer) { S.map.removeLayer(S.stormReportsLayer); S.stormReportsLayer = null; }
+    if (!S.showStormReports) return;
+
+    const KIND_COLOR = { tornado: '#ff1744', hail: '#00e676', wind: '#00b0ff' };
+    const KIND_LABEL = { tornado: 'Tornado', hail: 'Hail', wind: 'Wind' };
+
+    const group = L.layerGroup();
+    for (const bucket of buckets || []) {
+      const color = KIND_COLOR[bucket.kind];
+      const kindLabel = KIND_LABEL[bucket.kind];
+      for (const row of bucket.rows) {
+        const lat = parseFloat(row.Lat || row.lat);
+        const lng = parseFloat(row.Lon || row.lon);
+        if (!isFinite(lat) || !isFinite(lng)) continue;
+
+        const marker = L.circleMarker([lat, lng], {
+          radius: 5,
+          color: '#fff',
+          weight: 1,
+          fillColor: color,
+          fillOpacity: 0.9,
+          pane: 'stormReportsPane',
+        });
+        const detail = row['F_Scale'] || row.Size || row.Speed || '';
+        marker.bindPopup(
+          `<div class="popup-event" style="--popup-color:${color}">${escapeHtml(kindLabel)}${detail ? ' · ' + escapeHtml(detail) : ''}</div>` +
+          (row.Location ? `<div class="popup-headline">${escapeHtml(row.Location)}, ${escapeHtml(row.County || '')} ${escapeHtml(row.State || '')}</div>` : '') +
+          `<div class="popup-meta">` +
+            (row.Time ? `<div><strong>Time:</strong> ${escapeHtml(row.Time)} UTC</div>` : '') +
+            (row.Comments ? `<div>${escapeHtml(String(row.Comments).slice(0, 220))}</div>` : '') +
+          `</div>`,
+          { maxWidth: 280 }
+        );
+        group.addLayer(marker);
+      }
+    }
+    S.stormReportsLayer = group;
+    S.stormReportsLayer.addTo(S.map);
+  }
+
+  // -------------------- County boundaries (per-state, on demand) --------------------
+  async function fetchCounties(state) {
+    if (S.countiesCache[state]) {
+      renderCounties();
+      return;
+    }
+    try {
+      const url = `https://api.weather.gov/zones?type=county&area=${encodeURIComponent(state)}&include_geometry=true`;
+      const r = await fetch(url, { headers: { 'Accept': 'application/geo+json' } });
+      if (!r.ok) throw new Error('counties ' + r.status);
+      S.countiesCache[state] = await r.json();
+      renderCounties();
+    } catch (e) {
+      console.warn('counties fetch failed', e);
+    }
+  }
+
+  function renderCounties() {
+    if (S.countiesLayer) { S.map.removeLayer(S.countiesLayer); S.countiesLayer = null; }
+    if (!S.showCounties) return;
+    const data = S.countiesCache[S.state];
+    if (!data) return;
+
+    S.countiesLayer = L.geoJSON(data, {
+      pane: 'countiesPane',
+      style: {
+        color: '#9ba3b8',
+        weight: 0.7,
+        opacity: 0.4,
+        fillOpacity: 0,
+        interactive: false,
+      },
+    }).addTo(S.map);
   }
 
   // -------------------- search + pin --------------------
@@ -722,6 +1108,27 @@
     }, CFG.ALERT_REFRESH_MS);
   }
 
+  // SPC products + storm reports refresh on their own cadence:
+  //  - Outlook: ~30 min (SPC issues 6 updates/day for Day 1)
+  //  - Watches: 60 s (along with NWS alerts)
+  //  - Storm reports: 5 min while enabled
+  function startSpcRefresh() {
+    if (S.spcOutlookTimer) clearInterval(S.spcOutlookTimer);
+    S.spcOutlookTimer = setInterval(() => {
+      if (!document.hidden && S.showSpcOutlook) fetchSpcOutlook();
+    }, 30 * 60_000);
+
+    if (S.spcWatchesTimer) clearInterval(S.spcWatchesTimer);
+    S.spcWatchesTimer = setInterval(() => {
+      if (!document.hidden && S.showSpcWatches) fetchSpcWatches();
+    }, 60_000);
+
+    if (S.stormReportsTimer) clearInterval(S.stormReportsTimer);
+    S.stormReportsTimer = setInterval(() => {
+      if (!document.hidden && S.showStormReports) fetchStormReports();
+    }, 5 * 60_000);
+  }
+
   // -------------------- UI --------------------
   function initUI() {
     const timelineEl = document.querySelector('.timeline');
@@ -827,6 +1234,67 @@
           fetchRadarSites();
         } else {
           renderRadarSites();
+        }
+      });
+    }
+
+    // Coverage rings toggle
+    const ringsToggle = $('rings-toggle');
+    if (ringsToggle) {
+      ringsToggle.addEventListener('change', (e) => {
+        S.showCoverageRings = e.target.checked;
+        renderCoverageRings();
+      });
+    }
+
+    // SPC Day 1 outlook toggle
+    const outlookToggle = $('outlook-toggle');
+    if (outlookToggle) {
+      outlookToggle.addEventListener('change', (e) => {
+        S.showSpcOutlook = e.target.checked;
+        if (S.showSpcOutlook && !S.spcOutlookData) {
+          fetchSpcOutlook();
+        } else {
+          renderSpcOutlook();
+        }
+      });
+    }
+
+    // SPC watches toggle
+    const watchesToggle = $('watches-toggle');
+    if (watchesToggle) {
+      watchesToggle.addEventListener('change', (e) => {
+        S.showSpcWatches = e.target.checked;
+        if (S.showSpcWatches && !S.spcWatchesData) {
+          fetchSpcWatches();
+        } else {
+          renderSpcWatches();
+        }
+      });
+    }
+
+    // Storm reports toggle
+    const reportsToggle = $('reports-toggle');
+    if (reportsToggle) {
+      reportsToggle.addEventListener('change', (e) => {
+        S.showStormReports = e.target.checked;
+        if (S.showStormReports) {
+          fetchStormReports();
+        } else {
+          renderStormReports([]);
+        }
+      });
+    }
+
+    // County lines toggle
+    const countiesToggle = $('counties-toggle');
+    if (countiesToggle) {
+      countiesToggle.addEventListener('change', (e) => {
+        S.showCounties = e.target.checked;
+        if (S.showCounties) {
+          fetchCounties(S.state);
+        } else {
+          renderCounties();
         }
       });
     }
@@ -1006,6 +1474,9 @@
     fetchAlerts(false);
     startAlertRefresh();
     fetchRadarSites();
+    if (S.showSpcOutlook) fetchSpcOutlook();
+    if (S.showSpcWatches) fetchSpcWatches();
+    startSpcRefresh();
   }
 
   if (document.readyState === 'loading') {

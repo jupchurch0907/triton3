@@ -406,7 +406,119 @@ select option:checked {
 
 /* ============================================================
    NEXRAD RADAR SITES
+   - .radar-site is a 40x40 marker. Inside: a rotating sweep wedge
+     (.rs-sweep) and a fixed center dot (.rs-dot). Two color variants:
+     WSR-88D (amber, slow) and TDWR (blue, fast) — matched to the
+     real rotation rates of those dish types.
    ============================================================ */
+.radar-site {
+  background: transparent;
+  border: none;
+  pointer-events: none;
+}
+.radar-site .rs-dot,
+.radar-site .rs-sweep {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+  border-radius: 50%;
+}
+.radar-site .rs-dot {
+  /* Center dot — the radar site itself */
+  top: 16px;
+  left: 16px;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6);
+  box-sizing: border-box;
+  z-index: 2;
+}
+.radar-site .rs-sweep {
+  /* Rotating wedge — conic-gradient with a narrow fading sector to
+     mimic the dish beam pattern. */
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 40px;
+  z-index: 1;
+  transform-origin: 50% 50%;
+  will-change: transform;
+  /* Soft outer fade so the wedge doesn't end with a hard ring edge */
+  -webkit-mask-image: radial-gradient(circle at center, #000 30%, transparent 78%);
+          mask-image: radial-gradient(circle at center, #000 30%, transparent 78%);
+}
+
+/* WSR-88D — amber, ~5 RPM (12 s/rev) */
+.radar-site-wsr .rs-dot {
+  background: #ffb300;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6), 0 0 6px rgba(255,179,0,0.6);
+}
+.radar-site-wsr .rs-sweep {
+  background: conic-gradient(from 0deg,
+    rgba(255, 179, 0, 0.55) 0deg,
+    rgba(255, 179, 0, 0.28) 12deg,
+    rgba(255, 179, 0, 0) 60deg,
+    rgba(255, 179, 0, 0) 360deg);
+  animation: radar-site-spin 12s linear infinite;
+}
+
+/* TDWR — blue, ~30 RPM (3 s/rev) */
+.radar-site-tdwr .rs-dot {
+  background: #00b0ff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6), 0 0 6px rgba(0, 176, 255, 0.6);
+}
+.radar-site-tdwr .rs-sweep {
+  background: conic-gradient(from 0deg,
+    rgba(0, 176, 255, 0.6) 0deg,
+    rgba(0, 176, 255, 0.3) 10deg,
+    rgba(0, 176, 255, 0) 50deg,
+    rgba(0, 176, 255, 0) 360deg);
+  animation: radar-site-spin 3s linear infinite;
+}
+
+@keyframes radar-site-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Suppress the sweep at country-wide zoom — 160 spinners is too busy
+   and not legible at that scale. The dots themselves stay visible. */
+body.zoomed-out .radar-site .rs-sweep { display: none; }
+
+/* Selected radar site: brighter dot, more prominent sweep, glow ring. */
+.radar-site.selected .rs-dot {
+  transform: scale(1.4);
+  transform-origin: center;
+  box-shadow: 0 0 4px rgba(0,0,0,0.6), 0 0 14px currentColor;
+}
+.radar-site-wsr.selected .rs-dot { color: #ffb300; }
+.radar-site-tdwr.selected .rs-dot { color: #00b0ff; }
+.radar-site-wsr.selected .rs-sweep {
+  background: conic-gradient(from 0deg,
+    rgba(255, 179, 0, 0.85) 0deg,
+    rgba(255, 179, 0, 0.45) 14deg,
+    rgba(255, 179, 0, 0) 70deg,
+    rgba(255, 179, 0, 0) 360deg);
+}
+.radar-site-tdwr.selected .rs-sweep {
+  background: conic-gradient(from 0deg,
+    rgba(0, 176, 255, 0.85) 0deg,
+    rgba(0, 176, 255, 0.45) 12deg,
+    rgba(0, 176, 255, 0) 60deg,
+    rgba(0, 176, 255, 0) 360deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .radar-site .rs-sweep { animation: none; opacity: 0.35; }
+}
+
+/* SPC watches — dashed parallelogram-ish boxes, distinct from per-county
+   warnings drawn by the alerts layer. */
+.spc-watch-polygon {
+  filter: drop-shadow(0 0 5px currentColor);
+}
+
 .radar-site-label {
   background: rgba(10, 10, 10, 0.78) !important;
   border: 1px solid rgba(255, 179, 0, 0.45) !important;
@@ -565,6 +677,14 @@ body.zoomed-out .radar-site-label { display: none; }
   transform: translateX(0);
   pointer-events: auto;
 }
+/* Panel grows tall with all the toggles; keep it inside the viewport. */
+.layers-panel {
+  max-height: calc(100vh - 110px - var(--safe-top) - var(--safe-bottom));
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.layers-panel::-webkit-scrollbar { width: 4px; }
+.layers-panel::-webkit-scrollbar-thumb { background: var(--glass-border-strong); border-radius: 2px; }
 
 .layers-title {
   font-size: 10px;
@@ -573,6 +693,16 @@ body.zoomed-out .radar-site-label { display: none; }
   letter-spacing: 0.14em;
   color: var(--text-dim);
   padding-bottom: 4px;
+  border-bottom: 1px solid var(--glass-border);
+}
+.layers-section-header {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--text-muted);
+  margin-top: 4px;
+  padding-bottom: 2px;
   border-bottom: 1px solid var(--glass-border);
 }
 

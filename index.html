@@ -61,6 +61,7 @@
 
   <div id="layers-panel" class="layers-panel glass" aria-hidden="true">
     <div class="layers-title">Layers</div>
+
     <div class="layers-row">
       <label for="base-style">Base map</label>
       <select id="base-style">
@@ -69,8 +70,10 @@
         <option value="hybrid">Satellite</option>
       </select>
     </div>
+
+    <div class="layers-section-header">Radar</div>
     <div class="layers-row">
-      <label for="opacity">Radar opacity</label>
+      <label for="opacity">Opacity</label>
       <input type="range" id="opacity" min="0" max="100" value="75">
       <span class="layers-value" id="opacity-value">75%</span>
     </div>
@@ -85,20 +88,44 @@
       </select>
     </div>
     <div class="layers-row inline">
-      <label for="alerts-toggle">Show alerts</label>
-      <label class="switch"><input type="checkbox" id="alerts-toggle" checked><span class="switch-track"></span></label>
-    </div>
-    <div class="layers-row inline">
-      <label for="sites-toggle">NEXRAD sites</label>
-      <label class="switch"><input type="checkbox" id="sites-toggle" checked><span class="switch-track"></span></label>
-    </div>
-    <div class="layers-row inline">
       <label for="smooth-toggle">Smoothing</label>
       <label class="switch"><input type="checkbox" id="smooth-toggle" checked><span class="switch-track"></span></label>
     </div>
     <div class="layers-row inline">
       <label for="forecast-toggle">Include forecast</label>
       <label class="switch"><input type="checkbox" id="forecast-toggle" checked><span class="switch-track"></span></label>
+    </div>
+
+    <div class="layers-section-header">Alerts &amp; SPC</div>
+    <div class="layers-row inline">
+      <label for="alerts-toggle">Local warnings</label>
+      <label class="switch"><input type="checkbox" id="alerts-toggle" checked><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="watches-toggle">SPC watches</label>
+      <label class="switch"><input type="checkbox" id="watches-toggle" checked><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="outlook-toggle">Day 1 outlook</label>
+      <label class="switch"><input type="checkbox" id="outlook-toggle" checked><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="reports-toggle">Storm reports (24h)</label>
+      <label class="switch"><input type="checkbox" id="reports-toggle"><span class="switch-track"></span></label>
+    </div>
+
+    <div class="layers-section-header">Map overlays</div>
+    <div class="layers-row inline">
+      <label for="sites-toggle">NEXRAD sites</label>
+      <label class="switch"><input type="checkbox" id="sites-toggle" checked><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="rings-toggle">Coverage rings</label>
+      <label class="switch"><input type="checkbox" id="rings-toggle"><span class="switch-track"></span></label>
+    </div>
+    <div class="layers-row inline">
+      <label for="counties-toggle">County lines</label>
+      <label class="switch"><input type="checkbox" id="counties-toggle"><span class="switch-track"></span></label>
     </div>
   </div>
 
